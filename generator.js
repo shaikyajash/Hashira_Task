@@ -1,236 +1,217 @@
-// Function to convert string in any base to decimal (BigInt)
-function baseToDecimal(str, base) {
-    let res = 0n;
-    for (let i = 0; i < str.length; ++i) {
-        let digit;
-        let ch = str[i];
-        if (ch >= '0' && ch <= '9') digit = BigInt(ch.charCodeAt(0) - '0'.charCodeAt(0));
-        else digit = BigInt(ch.toLowerCase().charCodeAt(0) - 'a'.charCodeAt(0) + 10);
-        res = res * BigInt(base) + digit;
-    }
-    return res;
-}
-
-// Lagrange interpolation at x = 0, returns BigInt
-function lagrangeConstantTerm(points) {
-    let k = points.length;
-    let result = 0n;
-    for (let j = 0; j < k; ++j) {
-        let numerator = 1n, denominator = 1n;
-        for (let m = 0; m < k; ++m) {
-            if (m !== j) {
-                numerator *= -BigInt(points[m][0]);
-                denominator *= (BigInt(points[j][0]) - BigInt(points[m][0]));
-            }
-        }
-        let term = points[j][1] * numerator / denominator;
-        result += term;
-    }
-    return result;
-}
-
-// Function to get all combinations of k elements from an array
-function getCombinations(arr, k) {
-    if (k === 1) return arr.map(x => [x]);
-    if (k === arr.length) return [arr];
-    
-    const combinations = [];
-    for (let i = 0; i <= arr.length - k; i++) {
-        const head = arr[i];
-        const tailCombinations = getCombinations(arr.slice(i + 1), k - 1);
-        for (const tailCombination of tailCombinations) {
-            combinations.push([head, ...tailCombination]);
-        }
-    }
-    return combinations;
-}
-
-// Function to detect wrong shares and find the correct secret
-function findCorrectSecret(points, k) {
-    if (points.length === k) {
-        // If we have exactly k points, no redundancy to detect wrong shares
-        return {
-            secret: lagrangeConstantTerm(points),
-            correctShares: points,
-            wrongShares: []
-        };
-    }
-    
-    // Get all possible combinations of k points
-    const combinations = getCombinations(points, k);
-    const secretCounts = {};
-    const combinationSecrets = [];
-    
-    // Calculate secret for each combination
-    for (const combo of combinations) {
-        const secret = lagrangeConstantTerm(combo);
-        const secretStr = secret.toString();
-        
-        combinationSecrets.push({
-            combination: combo,
-            secret: secret
-        });
-        
-        if (!secretCounts[secretStr]) {
-            secretCounts[secretStr] = [];
-        }
-        secretCounts[secretStr].push(combo);
-    }
-    
-    // Find the most frequent secret (this should be the correct one)
-    let maxCount = 0;
-    let correctSecret = null;
-    let correctCombinations = [];
-    
-    for (const [secret, combinations] of Object.entries(secretCounts)) {
-        if (combinations.length > maxCount) {
-            maxCount = combinations.length;
-            correctSecret = BigInt(secret);
-            correctCombinations = combinations;
-        }
-    }
-    
-    // Identify correct and wrong shares
-    const correctSharesSet = new Set();
-    const wrongShares = [];
-    
-    // Add all shares that appear in correct combinations
-    for (const combo of correctCombinations) {
-        for (const point of combo) {
-            // Convert BigInt to string for serialization
-            const pointForSet = [point[0], point[1].toString()];
-            correctSharesSet.add(JSON.stringify(pointForSet));
-        }
-    }
-    
-    // Find wrong shares (those that don't appear in any correct combination)
-    for (const point of points) {
-        const pointForSet = [point[0], point[1].toString()];
-        const pointStr = JSON.stringify(pointForSet);
-        if (!correctSharesSet.has(pointStr)) {
-            wrongShares.push(point);
-        }
-    }
-    
-    const correctShares = [];
-    for (const pointStr of correctSharesSet) {
-        const parsed = JSON.parse(pointStr);
-        correctShares.push([parsed[0], BigInt(parsed[1])]);
-    }
-    
-    return {
-        secret: correctSecret,
-        correctShares: correctShares,
-        wrongShares: wrongShares,
-        analysis: {
-            totalCombinations: combinations.length,
-            uniqueSecrets: Object.keys(secretCounts).length,
-            correctCombinationsCount: maxCount,
-            secretFrequencies: Object.fromEntries(
-                Object.entries(secretCounts).map(([secret, combos]) => [secret, combos.length])
-            )
-        }
-    };
-}
-
-// Read JSON file and solve with wrong share detection
 const fs = require('fs');
 
-function solveFromFileWithDetection(filepath) {
-    const jsonString = fs.readFileSync(filepath, 'utf8');
-    const data = JSON.parse(jsonString);
-    const n = data.keys.n;
-    const k = data.keys.k;
-    
-    let points = [];
-    for (let key in data) {
-        if (key === 'keys') continue;
-        let x = parseInt(key);
-        let base = parseInt(data[key].base);
-        let value = data[key].value;
-        let y = baseToDecimal(value, base);
-        points.push([x, y]);
+function decodeBase(value, base) {
+  let result = 0n;
+  const lower = value.toLowerCase();
+  for (const ch of lower) {
+    let digit;
+    if (ch >= '0' && ch <= '9') {
+      digit = BigInt(ch.charCodeAt(0) - '0'.charCodeAt(0));
+    } else {
+      digit = BigInt(ch.charCodeAt(0) - 'a'.charCodeAt(0) + 10);
     }
-    
-    // Sort points by x coordinate
-    points.sort((a, b) => a[0] - b[0]);
-    
-    console.log(`\nAnalyzing ${filepath}:`);
-    console.log(`Total shares: ${points.length}, Required (k): ${k}`);
-    
-    if (points.length < k) {
-        console.log("Error: Not enough shares to reconstruct the secret!");
-        return null;
+    result = result * BigInt(base) + digit;
+  }
+  return result;
+}
+
+function gcd(a, b) {
+  a = a < 0n ? -a : a;
+  b = b < 0n ? -b : b;
+  while (b !== 0n) {
+    const temp = b;
+    b = a % b;
+    a = temp;
+  }
+  return a;
+}
+
+function constantFromCombination(comb) {
+  let cNum = 0n;
+  let cDen = 1n;
+  for (const { x: xi, y: yi } of comb) {
+    let num = 1n;
+    let den = 1n;
+    for (const { x: xj } of comb) {
+      if (xj === xi) continue;
+      num *= -xj;
+      den *= (xi - xj);
     }
-    
-    const result = findCorrectSecret(points, k);
-    
-    console.log(`Secret: ${result.secret}`);
-    console.log(`Correct shares: ${result.correctShares.length}`);
-    console.log(`Wrong shares: ${result.wrongShares.length}`);
-    
-    if (result.wrongShares.length > 0) {
-        console.log("\nWrong shares detected:");
-        result.wrongShares.forEach(share => {
-            console.log(`  x=${share[0]}, y=${share[1]}`);
-        });
+    cNum = cNum * den + yi * num * cDen;
+    cDen = cDen * den;
+    const g = gcd(cNum, cDen);
+    cNum /= g;
+    cDen /= g;
+  }
+  if (cDen < 0n) {
+    cNum = -cNum;
+    cDen = -cDen;
+  }
+  return { num: cNum, den: cDen };
+}
+
+function evaluateAt(x, comb) {
+  let sumNum = 0n;
+  let sumDen = 1n;
+  for (const { x: xi, y: yi } of comb) {
+    let num = 1n;
+    let den = 1n;
+    for (const { x: xj } of comb) {
+      if (xj === xi) continue;
+      num *= (x - xj);
+      den *= (xi - xj);
     }
-    
-    if (result.analysis) {
-        console.log("\nAnalysis:");
-        console.log(`  Total combinations tested: ${result.analysis.totalCombinations}`);
-        console.log(`  Unique secrets found: ${result.analysis.uniqueSecrets}`);
-        console.log(`  Correct combinations: ${result.analysis.correctCombinationsCount}`);
-        
-        if (result.analysis.uniqueSecrets > 1) {
-            console.log("  Secret frequencies:");
-            for (const [secret, count] of Object.entries(result.analysis.secretFrequencies)) {
-                console.log(`    ${secret}: ${count} combinations`);
-            }
+    sumNum = sumNum * den + yi * num * sumDen;
+    sumDen = sumDen * den;
+    const g = gcd(sumNum, sumDen);
+    sumNum /= g;
+    sumDen /= g;
+  }
+  if (sumDen < 0n) {
+    sumNum = -sumNum;
+    sumDen = -sumDen;
+  }
+  return { num: sumNum, den: sumDen };
+}
+
+function generateCombinations(arr, k) {
+  const result = [];
+  const n = arr.length;
+  const indices = Array.from({ length: k }, (_, i) => i);
+  result.push(indices.map(i => arr[i]));
+  while (true) {
+    let i = k - 1;
+    while (i >= 0 && indices[i] === i + n - k) i--;
+    if (i < 0) break;
+    indices[i]++;
+    for (let j = i + 1; j < k; j++) {
+      indices[j] = indices[j - 1] + 1;
+    }
+    result.push(indices.map(i => arr[i]));
+  }
+  return result;
+}
+
+function processTestCase(data) {
+  const n = data.keys.n;
+  const k = data.keys.k;
+  const shares = [];
+
+  for (const key of Object.keys(data)) {
+    if (key === 'keys') continue;
+    const xi = BigInt(key);
+    const base = parseInt(data[key].base, 10);
+    const yi = decodeBase(data[key].value, base);
+    shares.push({ x: xi, y: yi, id: key });
+  }
+
+  shares.sort((a, b) => (a.x < b.x ? -1 : 1));
+  const combos = generateCombinations(shares, k);
+
+  const constantMap = new Map();
+  combos.forEach((comb, idx) => {
+    const frac = constantFromCombination(comb);
+    if (frac.den === 1n) {
+      const key = frac.num.toString();
+      if (!constantMap.has(key)) {
+        constantMap.set(key, { count: 0, comboIndices: [] });
+      }
+      const obj = constantMap.get(key);
+      obj.count++;
+      obj.comboIndices.push(idx);
+    }
+  });
+
+  if (constantMap.size === 0) {
+    let best = { mismatches: n + 1, constStr: null, combIndex: null };
+    combos.forEach((comb, idx) => {
+      const fracConst = constantFromCombination(comb);
+      let mismatches = 0;
+      for (const sh of shares) {
+        const val = evaluateAt(sh.x, comb);
+        if (val.num !== sh.y * val.den) mismatches++;
+      }
+      if (mismatches < best.mismatches) {
+        best.mismatches = mismatches;
+        best.constStr =
+          fracConst.den === 1n
+            ? fracConst.num.toString()
+            : `${fracConst.num}/${fracConst.den}`;
+        best.combIndex = idx;
+      }
+    });
+    const wrong = [];
+    if (best.combIndex !== null) {
+      const comb = combos[best.combIndex];
+      for (const sh of shares) {
+        const val = evaluateAt(sh.x, comb);
+        if (val.num !== sh.y * val.den) {
+          wrong.push(sh.id);
         }
+      }
     }
-    
-    return result.secret.toString();
+    return { secret: best.constStr, wrongShares: wrong };
+  }
+
+  let maxCount = 0;
+  constantMap.forEach(obj => {
+    if (obj.count > maxCount) maxCount = obj.count;
+  });
+
+  const candidates = [];
+  constantMap.forEach((obj, constStr) => {
+    if (obj.count === maxCount)
+      candidates.push({ constStr, comboIndices: obj.comboIndices });
+  });
+
+  let chosen = { constStr: null, mismatches: n + 1, comboIndex: null };
+  candidates.forEach(cand => {
+    const combIdx = cand.comboIndices[0];
+    const comb = combos[combIdx];
+    let mismatches = 0;
+    for (const sh of shares) {
+      const val = evaluateAt(sh.x, comb);
+      if (val.num !== sh.y * val.den) mismatches++;
+    }
+    if (mismatches < chosen.mismatches) {
+      chosen = { constStr: cand.constStr, mismatches, comboIndex: combIdx };
+    } else if (mismatches === chosen.mismatches) {
+      const currentVal = BigInt(cand.constStr);
+      const chosenVal = BigInt(chosen.constStr);
+      if (currentVal < chosenVal) {
+        chosen = { constStr: cand.constStr, mismatches, comboIndex: combIdx };
+      }
+    }
+  });
+
+  const wrongShares = [];
+  const chosenComb = combos[chosen.comboIndex];
+  for (const sh of shares) {
+    const val = evaluateAt(sh.x, chosenComb);
+    if (val.num !== sh.y * val.den) {
+      wrongShares.push(sh.id);
+    }
+  }
+
+  return { secret: chosen.constStr, wrongShares };
 }
 
-// Original function for comparison
-function solveFromFile(filepath) {
-    const jsonString = fs.readFileSync(filepath, 'utf8');
-    const data = JSON.parse(jsonString);
-    const n = data.keys.n;
-    const k = data.keys.k;
-    let points = [];
-    for (let key in data) {
-        if (key === 'keys') continue;
-        let x = parseInt(key);
-        let base = parseInt(data[key].base);
-        let value = data[key].value;
-        let y = baseToDecimal(value, base);
-        points.push([x, y]);
-    }
-    points.sort((a, b) => a[0] - b[0]);
-    let kPoints = points.slice(0, k);
-    return lagrangeConstantTerm(kPoints).toString();
-}
+// Direct usage: Specify test files here
+const testFiles = [
+  'testcase1.json',
+  'testcase2.json', 
+];
 
-// MAIN
-console.log("=== ORIGINAL METHOD (first k shares) ===");
-console.log("Secret for testcase 1:");
-console.log(solveFromFile('testcase1.json'));
-console.log("Secret for testcase 2:");
-console.log(solveFromFile('testcase2.json'));
-
-console.log("\n=== ENHANCED METHOD (with wrong share detection) ===");
-console.log("Secret for testcase 1:");
-const secret1 = solveFromFileWithDetection('testcase1.json');
-
-console.log("\n" + "=".repeat(60));
-console.log("Secret for testcase 2:");
-const secret2 = solveFromFileWithDetection('testcase2.json');
-
-console.log("\n" + "=".repeat(80));
-console.log("🔑 FINAL SECRET KEYS (using correct shares only):");
-console.log("=".repeat(80));
-console.log(`✓ TESTCASE 1 SECRET KEY: ${secret1}`);
-console.log(`✓ TESTCASE 2 SECRET KEY: ${secret2}`);
-console.log("=".repeat(80));
+// Run each test case
+testFiles.forEach((file, idx) => {
+  const content = fs.readFileSync(file, 'utf-8');
+  const data = JSON.parse(content);
+  const result = processTestCase(data);
+  console.log(`\n🧪 Test case ${idx + 1} (${file})`);
+  console.log(`🔐 Secret: ${result.secret}`);
+  if (result.wrongShares.length > 0) {
+    console.log(`❌ Wrong share(s): ${result.wrongShares.join(', ')}`);
+  } else {
+    console.log(`✅ All shares are valid.`);
+  }
+});
